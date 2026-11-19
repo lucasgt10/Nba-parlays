@@ -167,6 +167,47 @@ def historical_parlays(season, n_legs, mode, stake):
             "profit": profit, "roi": roi, "bankroll_history": history}
 
 
+@st.cache_data(show_spinner="Building every past parlay to compare with yours...")
+def past_parlays_table(n_legs, mode):
+    """
+    Builds the parlay of EVERY past day with the parlay builder (Part 5) and keeps,
+    for each day: its chance of winning, its combined odds and whether it won.
+    Cached: it is only built once for each number of legs and mode.
+    """
+    rows = []
+    for date in regular["date"].drop_duplicates().sort_values():
+        day_games = regular[regular["date"] == date]
+        legs = pick_legs(day_games, n_legs, mode)
+        if len(legs) == 0:                      # not enough games that day
+            continue
+        combined_odds, combined_prob, expected_value = parlay_stats(legs)
+        rows.append({"date": date,
+                     "combined_prob": combined_prob,
+                     "combined_odds": combined_odds,
+                     "won": bool(legs["won"].sum() == n_legs)})   # True only if ALL legs won
+    return pd.DataFrame(rows)
+
+
+def similar_parlays(n_legs, mode, my_prob, window=0.05):
+    """
+    Past parlays whose chance of winning was close to my_prob (+/- window).
+    Returns a dictionary with how many there were, how often they were expected
+    to win, how often they really won, and the ROI of betting 1 euro on each.
+    """
+    past = past_parlays_table(n_legs, mode)
+    close = past[(past["combined_prob"] - my_prob).abs() <= window]
+    if len(close) == 0:
+        return {"count": 0}
+    # profit of 1 euro on each parlay: win -> odds - 1, lose -> -1
+    profit = close["won"] * (close["combined_odds"] - 1) - (~close["won"]) * 1
+    return {"count": len(close),
+            "low": max(my_prob - window, 0) * 100,
+            "high": min(my_prob + window, 1) * 100,
+            "expected": close["combined_prob"].mean() * 100,
+            "actual": close["won"].mean() * 100,
+            "roi": profit.mean() * 100}
+
+
 @st.cache_data(show_spinner="Testing the strategy...")
 def run_strategy(strategy_name, season, stake):
     return backtest(filter_season(season), strategy_name, stake=stake,
@@ -330,7 +371,32 @@ def page_next_day():
     legs = pick_legs(day_games, n_legs, mode)
     st.subheader("Suggested parlay")
     st.dataframe(legs_table(legs, show_result=False), hide_index=True)
-    show_parlay_numbers(legs, stake)
+    combined_odds, combined_prob, expected_value = show_parlay_numbers(legs, stake)
+
+    # --- past parlays with a chance of winning similar to THIS parlay ---
+    similar = similar_parlays(n_legs, mode, combined_prob)
+    st.subheader("Past parlays with a similar chance")
+    if similar["count"] == 0:
+        st.info("No past parlay of this type had a similar chance of winning, "
+                "so there is nothing to compare with.")
+    else:
+        st.write(f"Past **{n_legs}-leg {mode}** parlays whose chance of winning was between "
+                 f"**{similar['low']:.0f}% and {similar['high']:.0f}%** (yours: "
+                 f"{combined_prob * 100:.1f}%):")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Similar parlays", f"{similar['count']:,}")
+        c2.metric("Expected to win", f"{similar['expected']:.1f} %")
+        c3.metric("Really won", f"{similar['actual']:.1f} %")
+        c4.metric("ROI", f"{similar['roi']:.2f} %")
+        gap = similar["actual"] - similar["expected"]
+        if similar["count"] < 100:
+            st.warning(f"Only {similar['count']} similar parlays: a small sample, "
+                       "so this result is only an indication.")
+        elif abs(gap) <= 3:
+            st.success(f"These parlays won almost exactly as often as the odds said "
+                       f"({gap:+.1f} points): the odds were accurate, so there was no edge.")
+        else:
+            st.write(f"These parlays won {gap:+.1f} points compared with what the odds said.")
 
     past = historical_parlays("All seasons", n_legs, mode, stake)
     st.subheader("How this type of parlay did in the past")
